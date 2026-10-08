@@ -60,9 +60,28 @@ def product_family(sku: str) -> str:
     The original SKU printed on the PDF is never modified.
     """
     original = normalize_space(sku)
-    # Remove trailing digits plus an optional separator immediately before them.
-    base = re.sub(r"(?:[\s_-]*\d+)\s*$", "", original).rstrip(" _-")
+    # Remove trailing digits and any separators/punctuation immediately before them.
+    # This intentionally handles variants such as:
+    #   BLUSHPINK_01, BLUSHPINK-01, BLUSHPINK.01, BLUSHPINK01
+    # while keeping text suffixes such as BLUSHPINK_A separate.
+    base = re.sub(r"[\W_]*\d+\s*$", "", original, flags=re.UNICODE).strip()
     return base or original
+
+
+def family_group_key(family: str) -> str:
+    """
+    Internal-only key used to decide whether two SKU families are the same product.
+
+    Case and separators/punctuation are ignored so these group together:
+      BLUSHPINK, blush pink, BLUSH_PINK, BLUSH-PINK
+
+    Letters are never removed, so a text suffix still creates another product:
+      BLUSHPINK_A != BLUSHPINK
+
+    The PDF page and printed SKU are never changed.
+    """
+    value = normalize_space(family).casefold()
+    return "".join(ch for ch in value if ch.isalnum())
 
 
 def alpha_key(value: str):
@@ -195,7 +214,7 @@ def sort_rows(rows: List[LabelRow]) -> List[LabelRow]:
     readable = sorted(
         readable,
         key=lambda r: (
-            alpha_key(r.family),
+            alpha_key(family_group_key(r.family)),
             SIZE_RANK[r.size],
             r.source_index,
             r.page_number,
@@ -251,8 +270,9 @@ def summary_dataframe(rows: List[LabelRow]) -> pd.DataFrame:
         return pd.DataFrame(columns=["Product Family", "Size", "Labels"])
 
     df = pd.DataFrame([asdict(r) for r in ok])
-    # Group case-insensitively while displaying the first original family spelling.
-    df["family_key"] = df["family"].map(lambda x: normalize_space(x).casefold())
+    # Group using the same internal family normalization used for label sorting,
+    # while displaying the first original family spelling.
+    df["family_key"] = df["family"].map(family_group_key)
     display_names = df.groupby("family_key", sort=False)["family"].first()
     summary = (
         df.groupby(["family_key", "size"], dropna=False)
@@ -290,5 +310,7 @@ def process_pdfs(named_pdf_bytes: Iterable[Tuple[str, bytes]]) -> Dict[str, Any]
         "blank_inserted": blank_inserted,
         "input_labels": len(rows),
         "output_pages": output_pages,
-        "product_families": int(readable_df["family"].nunique()) if len(readable_df) else 0,
+        "product_families": (
+            int(readable_df["family"].map(family_group_key).nunique()) if len(readable_df) else 0
+        ),
     }
